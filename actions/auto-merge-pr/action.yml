@@ -1,0 +1,80 @@
+name: 'Auto Merge PR'
+description: 'Automatically merge a PR'
+inputs:
+  PR_NUMBER:
+    description: 'Number of the PR to merge'
+    required: true
+  PR_TOKEN:
+    description: 'GitHub token'
+    required: true
+  PR_HEAD_SHA:
+    description: 'SHA of the head commit of the PR'
+    required: true
+  PR_URL:
+    description: 'URL of the PR'
+    required: true
+  ALERT_WEBHOOK:
+    description: 'Webhook URL to send alerts'
+    required: false
+    default: ''
+runs:
+  using: "composite"
+  steps:
+  - name: Merge PR
+    id: merge-pr
+    run: |
+      sleep 15
+      
+      # Define the maximum waiting time in seconds
+      max_wait_time=120 # 50 minutes
+
+      # Start a timer to keep track of waiting time
+      start_time=$(date +%s)
+
+      while : ; do
+        current_time=$(date +%s)
+        elapsed_time=$((current_time - start_time))
+
+        if [[ $elapsed_time -ge $max_wait_time ]]; then
+          echo "The status check run-time exceeded the maximum limit. Workflow was exited... Attention required! ❌: ${{ inputs.PR_URL }}" | tee $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        check_runs_url="https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.PR_HEAD_SHA }}/check-runs"
+        check_runs_response=$(curl -s -H "Authorization: token ${{ inputs.PR_TOKEN }}" "$check_runs_url")
+        in_progress_or_queued_runs=$(echo "$check_runs_response" | jq -r '.check_runs[] | select(.status == "queued" or .status == "in_progress")')
+        failed_runs=$(echo "$check_runs_response" | jq -r '.check_runs[] | select(.conclusion == "failure")')
+
+        if [[ -n "$failed_runs" ]]; then
+          echo "Not all check runs were successful. Cannot merge pull request! Attention required! ❌: ${{ inputs.PR_URL }}" | tee $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        if [[ -z "$in_progress_or_queued_runs" ]]; then
+          echo "All check runs completed."
+          break
+        else
+          echo "Some check runs are still in progress or queued. Waiting for 5 minutes..."
+          sleep 60
+        fi
+      done
+
+      echo "All check runs were successful. Merging pull request..."
+
+      merge_response=$(curl -X PUT -o /dev/null -w "%{http_code}" -H "Authorization: token ${{ inputs.PR_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/pulls/${{ inputs.PR_NUMBER }}/merge")
+      echo "Merge Response: $merge_response"
+
+      if [[ $merge_response -eq 200 ]]; then
+        message="All check runs were successful and pull request was automatically merged. ✅: ${{ inputs.PR_URL }}"
+        echo "$message" | tee $GITHUB_STEP_SUMMARY
+        if [[ -n "${{ inputs.ALERT_WEBHOOK }}" ]]; then
+          curl -X POST -H 'Content-Type: application/json' --data '{
+            "text": "'"$message"'"
+          }' "${{ inputs.ALERT_WEBHOOK }}"
+        fi
+      else
+        echo "Pull request could not be merged! Attention required! ❌: ${{ inputs.PR_URL }}" | tee $GITHUB_STEP_SUMMARY
+        exit 1
+      fi
+
+    shell: bash # Specify the shell for running commands

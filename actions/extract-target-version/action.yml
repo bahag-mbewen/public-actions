@@ -1,0 +1,63 @@
+name: 'Extract Target Branch Version'
+description: 'Extracts the target branch version from the label config file'
+
+inputs:
+  WORKFLOW_TRIGGERED_AT:
+    description: 'The time the workflow was triggered'
+    required: true
+
+outputs:
+  RELEASE_TARGET_VERSION:
+    description: 'Target version of the release'
+    value: ${{ steps.extract-target-version.outputs.RELEASE_TARGET_VERSION }}
+  DEV_TARGET_VERSION:
+    description: 'Target version of the development branch'
+    value: ${{ steps.extract-target-version.outputs.DEV_TARGET_VERSION }}
+  WORKFLOW_IS_TRIGGERED_DURING_RELEASE_PERIOD:
+    description: 'Boolean to indicate if the workflow is triggered during the release period'
+    value: ${{ steps.extract-target-version.outputs.WORKFLOW_IS_TRIGGERED_DURING_RELEASE_PERIOD }}
+
+runs:
+  using: "composite"
+  steps:
+  - name: Extract Target Version
+    id: extract-target-version
+    run: |
+      WORKFLOW_TRIGGERED_AT_UNIX_FORMAT=$(date -d "${{ inputs.WORKFLOW_TRIGGERED_AT }}" +%s)
+
+      # Read timestamps and release version from the label config file
+      CONFIG=$(cat .github/label_config.yml)
+      TIMESTAMPS=($(echo "$CONFIG" | yq eval '.labels | keys | .[]' -))
+
+      for ((i=0; i<$((${#TIMESTAMPS[@]}-1)); i++)); do
+        CURRENT_TIMESTAMP=${TIMESTAMPS[i]}
+        CURRENT_TIMESTAMP_UNIX_FORMAT=$(date -d "$CURRENT_TIMESTAMP" +%s)
+
+        NEXT_TIMESTAMP=${TIMESTAMPS[i+1]}
+        NEXT_TIMESTAMP_UNIX_FORMAT=$(date -d "$NEXT_TIMESTAMP" +%s)
+
+        if [[ $CURRENT_TIMESTAMP_UNIX_FORMAT -lt $WORKFLOW_TRIGGERED_AT_UNIX_FORMAT && $NEXT_TIMESTAMP_UNIX_FORMAT -gt $WORKFLOW_TRIGGERED_AT_UNIX_FORMAT ]]; then
+
+          # Get the release and develop labels
+          WORKFLOW_IS_TRIGGERED_DURING_RELEASE_PERIOD=$(echo "$CONFIG" | yq eval ".labels[\"$CURRENT_TIMESTAMP\"][\"start_of_release_period\"]" -)
+          RELEASE_TARGET_VERSION=$(echo "$CONFIG" | yq eval ".labels[\"$CURRENT_TIMESTAMP\"][\"release\"]" -)
+          DEV_TARGET_VERSION=$(echo "$CONFIG" | yq eval ".labels[\"$CURRENT_TIMESTAMP\"][\"develop\"]" -)
+
+          echo "RELEASE_TARGET_VERSION=${RELEASE_TARGET_VERSION}" | tee -a $GITHUB_OUTPUT
+          echo "DEV_TARGET_VERSION=${DEV_TARGET_VERSION}" | tee -a $GITHUB_OUTPUT
+          echo "WORKFLOW_IS_TRIGGERED_DURING_RELEASE_PERIOD=${WORKFLOW_IS_TRIGGERED_DURING_RELEASE_PERIOD}" | tee -a $GITHUB_OUTPUT
+
+          if [[ $WORKFLOW_IS_TRIGGERED_DURING_RELEASE_PERIOD == 'true' ]]; then
+            echo "Current date is in release period."
+          else
+            echo "Current date is not in release period." | tee $GITHUB_STEP_SUMMARY
+          fi
+
+          exit 0
+        fi
+      done
+
+      echo "Error: No matching time period was found for the current date. Please adjust label config file. Workflow was exited..." | tee $GITHUB_STEP_SUMMARY
+      exit 1
+
+    shell: bash # Specify the shell for running commands
